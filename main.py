@@ -1,0 +1,166 @@
+import asyncio
+import random
+import sys
+
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+from bs4 import BeautifulSoup
+from fastapi import FastAPI, Response
+from fastapi.responses import HTMLResponse
+from playwright.async_api import async_playwright, Route
+
+context = None
+playwright = None
+
+app = FastAPI()
+
+class PdfState:
+    def __init__(self, max_tries=5):
+        self.file: bytes | None = None
+        self.captured = False
+        self.tries = 0
+        self.max_tries = max_tries
+        self.event = asyncio.Event()
+
+async def handle_pdf(route: Route, state: PdfState):
+    if state.captured or state.tries >= state.max_tries:
+        await route.continue_()
+        return
+
+    response = await route.fetch()
+    ctype = response.headers.get("content-type", "")
+
+    if response.status == 200 and "application/pdf" in ctype:
+        state.file = await response.body()
+        state.captured = True
+        state.event.set()
+
+    state.tries += 1
+    await route.fulfill(response=response)
+
+@app.on_event("startup")
+async def startup():
+    global context, page, playwright
+    global user_agents, viewports, locales
+
+    playwright = await async_playwright().start()
+
+    context = await playwright.chromium.launch_persistent_context(
+        user_data_dir=r"C:\Users\MSI\AppData\Local\Google\Chrome\User Data\Profile 2",
+        channel="chrome",
+        user_agent=random.choice(user_agents),
+        viewport=random.choice(viewports),
+        locale=random.choice(locales),
+        headless=False,
+        accept_downloads=True,
+        args=[
+            '--disable-features=DevToolsDebuggingRestrictions',
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+        ]
+    )
+
+    page = await context.new_page()
+
+    await page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    """)
+
+@app.get('/getFile')
+async def get_file(url: str, pos: int = 0):
+    global context
+
+    try:
+        page = await context.new_page()
+
+        await page.goto(url, timeout=60000)
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "html.parser")
+        if soup.find('div', class_='b-offline-content') != None: # Проверка на отсутствие ресурса
+                return Response(status_code=404)
+
+        await page.wait_for_selector("span.js-case-header-case_num", timeout=15000)
+
+        max_attempt_count = 40
+
+        pdf_links = []
+
+        for _ in range(max_attempt_count):
+            await page.click("div[title='Нажмите, чтобы ознакомиться с полной хронологией дела.']") # Раскрыть список хронологии дела
+            await page.wait_for_selector("div[class='b-chrono-item-header js-chrono-item-header page-break b-chrono-item-header-expanded']", timeout=15000)
+
+            html = await page.content()
+            soup = BeautifulSoup(html, "html.parser")
+
+            if soup.find('span', class_='js-case-header-case_num') != None: # Проверка на загрузку страницы
+                pdf_links = [a['href'] for a in soup.find_all('a', href=True) if '.pdf' in a['href'].lower()]
+                break
+
+            asyncio.sleep(0.5)
+
+        if len(pdf_links) == 0 or pos >= len(pdf_links):
+            return Response(status_code=404)
+        
+        state = PdfState()
+
+        await context.route(
+            "**/*.pdf*",
+            lambda route: handle_pdf(route, state)
+        )
+
+        await page.goto(pdf_links[pos].replace("Kad/PdfDocument", "Document/Pdf"), timeout=60000)
+
+        await asyncio.wait_for(state.event.wait(), timeout=15)
+
+    except Exception as e:
+        print("Error occured", e)
+        return Response(None, status_code=500)
+    
+    finally:
+        await page.close()
+
+    if state.file == None:
+        return Response(status_code=404)
+    
+    return Response(state.file, media_type="application/pdf")
+    
+
+@app.get('/getPage')
+async def get_page(url: str):
+    global context
+    source = None
+
+    try:
+        page = await context.new_page()
+
+        await page.goto(url, timeout=60000)
+
+        html = await page.content()
+        soup = BeautifulSoup(html, "html.parser")
+        if soup.find('div', class_='b-offline-content') != None: # Проверка на отсутствие ресурса
+                return Response(status_code=404)
+
+        await page.wait_for_selector("span.js-case-header-case_num", timeout=15000)
+
+        max_attempt_count = 40
+
+        for _ in range(max_attempt_count):
+            html = await page.content()
+            soup = BeautifulSoup(html, "html.parser")
+
+            if soup.find('span', class_='js-case-header-case_num') != None:
+                source = html
+                break
+
+            await asyncio.sleep(0.5)
+
+    except Exception as e:
+        print("Error occured", e)
+        return Response(None, status_code=500)
+    
+    finally:
+        await page.close()
+
+    return HTMLResponse(source)
