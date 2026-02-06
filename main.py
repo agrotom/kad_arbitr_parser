@@ -36,12 +36,6 @@ async def handle_pdf(route: Route, state: PdfState):
     if response.status == 200 and "application/pdf" in ctype:
         state.file = await response.body()
 
-        try:
-            with open("output/" + response.url.split('/')[-1].split('?')[0], "wb") as f:
-                f.write(state.file)
-        except:
-            pass
-
         state.captured = True
         state.event.set()
 
@@ -60,6 +54,8 @@ async def startup():
         headless=False,
         accept_downloads=True,
         args=[
+			"--no-sandbox",
+			"--disable-dev-shm-usage"
             '--disable-features=DevToolsDebuggingRestrictions',
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
