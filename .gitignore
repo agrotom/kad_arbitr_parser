@@ -4,3 +4,4 @@ run.bat
 __pycache__
 .vscode
 output
+*.tar
