@@ -1,16 +1,19 @@
 import asyncio
+from datetime import datetime
 import json
 import sys
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse
 from playwright.async_api import async_playwright, Route
 
 MAX_TRIES = 2
+
+DATE_FORMAT = "%d.%m.%Y"
 
 context = None
 playwright = None
@@ -50,6 +53,14 @@ async def handle_pdf(route: Route, state: PdfState):
     state.tries += 1
     await route.fulfill(response=response)
 
+async def ensure_browser():
+    global context
+    try:
+        page = await context.new_page()
+        await page.close()
+    except:
+        await restart_browser()
+
 async def start_browser():
     global context, playwright
 
@@ -73,7 +84,7 @@ async def start_browser():
         accept_downloads=True,
         args=[
 			"--no-sandbox",
-			"--disable-dev-shm-usage"
+			"--disable-dev-shm-usage",
             '--disable-features=DevToolsDebuggingRestrictions',
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
@@ -84,16 +95,12 @@ async def restart_browser():
     global context, playwright
 
     async with restart_lock:
-        browser = context.browser if context else None
 
-        if context and context.browser.is_connected():
-            return
-        
         print("Restarting browser...")
 
         try:
-            if browser:
-                await browser.close()
+            if context:
+                await context.close()
         except:
             pass
 
@@ -102,6 +109,9 @@ async def restart_browser():
                 await playwright.stop()
         except:
             pass
+
+        context = None
+        playwright = None
 
         await start_browser()
 
@@ -118,16 +128,17 @@ async def get_file(url: str, pos: int = 0):
     async with job_semaphore:
         for _ in range(MAX_TRIES):
             try:
+                await ensure_browser()
                 page = await context.new_page()
 
                 page_created = True
                 
                 state = PdfState()
 
-                await page.route(
-                    "**/*.pdf*",
-                    lambda route: handle_pdf(route, state)
-                )
+                async def route_handler(route: Route):
+                    await handle_pdf(route, state)
+
+                await page.route("**/*.pdf*", route_handler)
 
                 await page.goto(url, timeout=30000)
 
@@ -161,19 +172,24 @@ async def get_page(url: str):
     async with job_semaphore:
         for _ in range(MAX_TRIES):
             try:
+                await ensure_browser()
                 page = await context.new_page()
 
                 page_created = True
 
                 await page.goto(url, timeout=30000)
 
+                await page.wait_for_function("""
+                    () =>
+                    document.querySelector("div.b-offline-content") ||
+                    document.querySelector("span.js-case-header-case_num")
+                """, timeout=30000)
+
                 html = await page.content()
                 soup = BeautifulSoup(html, "html.parser")
                 if soup.find('div', class_='b-offline-content') != None: # Проверка на отсутствие ресурса
                         await page.close()
                         return Response(status_code=410)
-
-                await page.wait_for_selector("span.js-case-header-case_num", timeout=30000)
 
                 max_attempt_count = 40
 
@@ -188,10 +204,12 @@ async def get_page(url: str):
 
                     if soup.find('span', class_='js-case-header-case_num') != None: # Проверка на загрузку страницы
                         source = html
-                        pdf_links = [a['href'].replace("Kad/PdfDocument", "Document/Pdf") for a in soup.find_all('a', href=True) if '.pdf' in a['href'].lower()]
+                        sorted_divs = [a for a in sorted(soup.find_all('div', class_='b-chrono-item'), reverse=True, key=lambda div: datetime.strptime(div.get("data-date"), DATE_FORMAT))]
+                        a_hrefs = [div.find('a', href=True) for div in sorted_divs if div.find('a', href=True) != None]
+                        pdf_links = [a['href'].replace("Kad/PdfDocument", "Document/Pdf") for a in a_hrefs if '.pdf' in a['href'].lower()]
                         break
 
-                    asyncio.sleep(0.5)
+                    await asyncio.sleep(0.5)
 
             except Exception as e:
                 print("Error occured", e)
