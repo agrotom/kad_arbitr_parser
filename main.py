@@ -24,7 +24,8 @@ restart_lock = asyncio.Lock()
 
 MAX_CONCURRENT_JOBS = 2
 
-job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+MANUAL_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+BACKGROUND_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 app = FastAPI()
 
@@ -120,12 +121,14 @@ async def startup():
     await start_browser()
 
 @app.get('/getFile')
-async def get_file(url: str, pos: int = 0):
+async def get_file(background: bool, url: str, pos: int = 0):
     global context
 
     page_created = False
 
-    async with job_semaphore:
+    semaphore = BACKGROUND_SEMAPHORE if background else MANUAL_SEMAPHORE
+
+    async with semaphore:
         for _ in range(MAX_TRIES):
             try:
                 await ensure_browser()
@@ -163,13 +166,15 @@ async def get_file(url: str, pos: int = 0):
             return Response(state.file, media_type="application/pdf")
     
 @app.get('/getPage')
-async def get_page(url: str):
+async def get_page(background: bool, url: str):
     global context
     source = None
 
     page_created = False
 
-    async with job_semaphore:
+    semaphore = BACKGROUND_SEMAPHORE if background else MANUAL_SEMAPHORE
+
+    async with semaphore:
         for _ in range(MAX_TRIES):
             try:
                 await ensure_browser()

@@ -15,8 +15,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install --with-deps chrome
 
 COPY ./main.py .
+COPY ./logging.yaml .
 
-ENV DISPLAY=:99
 EXPOSE 9001
 
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 & exec uvicorn main:app --host 0.0.0.0 --port 9001"]
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+
+#CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9001", "--log-config", "logging.yaml"]
+#CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 & exec uvicorn main:app --host 0.0.0.0 --port 9001 --log-config logging.yaml"]
