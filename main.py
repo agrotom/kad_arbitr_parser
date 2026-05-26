@@ -96,25 +96,27 @@ async def restart_browser():
     global context, playwright
 
     async with restart_lock:
-
-        print("Restarting browser...")
-
         try:
-            if context:
-                await context.close()
-        except:
-            pass
+            print("Restarting browser...")
 
-        try:
-            if playwright:
-                await playwright.stop()
-        except:
-            pass
+            try:
+                if context:
+                    await context.close()
+            except:
+                pass
 
-        context = None
-        playwright = None
+            try:
+                if playwright:
+                    await playwright.stop()
+            except:
+                pass
 
-        await start_browser()
+            context = None
+            playwright = None
+
+            await start_browser()
+        finally:
+            context = None
 
 @app.on_event("startup")
 async def startup():
@@ -124,8 +126,6 @@ async def startup():
 async def get_file(background: bool, url: str, pos: int = 0):
     global context
 
-    page_created = False
-
     semaphore = BACKGROUND_SEMAPHORE if background else MANUAL_SEMAPHORE
 
     async with semaphore:
@@ -133,8 +133,6 @@ async def get_file(background: bool, url: str, pos: int = 0):
             try:
                 await ensure_browser()
                 page = await context.new_page()
-
-                page_created = True
                 
                 state = PdfState()
 
@@ -149,15 +147,14 @@ async def get_file(background: bool, url: str, pos: int = 0):
 
             except Exception as e:
                 print("Error occured", e)
-
-                if context and context.browser.is_connected() == False:
-                    await restart_browser()
-                    continue
+                
+                await restart_browser()
 
                 return Response(None, status_code=500)
             
             finally:
-                if page_created:
+                if page:
+                    await page.route("**/*.pdf*", route_handler)
                     await page.close()
 
             if state.file == None:
@@ -170,9 +167,9 @@ async def get_page(background: bool, url: str):
     global context
     source = None
 
-    page_created = False
-
     semaphore = BACKGROUND_SEMAPHORE if background else MANUAL_SEMAPHORE
+
+    html = None
 
     async with semaphore:
         for _ in range(MAX_TRIES):
@@ -180,15 +177,17 @@ async def get_page(background: bool, url: str):
                 await ensure_browser()
                 page = await context.new_page()
 
-                page_created = True
-
                 await page.goto(url, timeout=30000)
 
-                await page.wait_for_function("""
-                    () =>
-                    document.querySelector("div.b-offline-content") ||
-                    document.querySelector("span.js-case-header-case_num")
-                """, timeout=30000)
+                #await page.wait_for_function("""
+                #    () =>
+                #    document.querySelector("div.b-offline-content") ||
+                #    document.querySelector("span.js-case-header-case_num")
+                #""", timeout=30000)
+
+                await page.wait_for_load_state("networkidle")
+
+                await asyncio.sleep(1)
 
                 html = await page.content()
                 soup = BeautifulSoup(html, "html.parser")
@@ -201,7 +200,7 @@ async def get_page(background: bool, url: str):
                 pdf_links = []
 
                 for _ in range(max_attempt_count):
-                    await page.click("div[title='Нажмите, чтобы ознакомиться с полной хронологией дела.']") # Раскрыть список хронологии дела
+                    await page.click("div[title='Нажмите, чтобы ознакомиться с полной хронологией дела.']", timeout=60000) # Раскрыть список хронологии дела
                     await page.wait_for_selector("div[class='b-chrono-item-header js-chrono-item-header page-break b-chrono-item-header-expanded']", timeout=60000)
 
                     html = await page.content()
@@ -218,15 +217,15 @@ async def get_page(background: bool, url: str):
 
             except Exception as e:
                 print("Error occured", e)
+                print("Last HTML:")
+                print(html)
 
-                if context and context.browser.is_connected() == False:
-                    await restart_browser()
-                    continue
+                await restart_browser()
                 
                 return Response(None, status_code=500)
             
             finally:
-                if page_created:
+                if page:
                     await page.close()
 
             return HTMLResponse(json.dumps({ 'source': source, 'pdf_links': pdf_links }), media_type="application/json")
